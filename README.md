@@ -2,7 +2,7 @@
 
 An AI agent that checks supplier invoices against purchase orders before they get paid. Clean invoices are approved automatically; anything that doesn't match goes to finance on Slack with the exact reason.
 
-**[Try the live demo](https://YOUR-USERNAME.github.io/invoice-reconciliation-agent/)**: pick a test invoice, edit what the AI read, and watch the decision change.
+**[Try the live demo](https://roynehaa.github.io/invoice-reconciliation-agent/)**: pick a test invoice, edit what the AI read, and watch the decision change.
 
 ## How it works
 
