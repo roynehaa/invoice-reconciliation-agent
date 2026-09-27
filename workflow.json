@@ -1,0 +1,589 @@
+{
+  "name": "AI Invoice Reconciliation Agent",
+  "nodes": [
+    {
+      "parameters": {
+        "pollTimes": {
+          "item": [
+            {
+              "mode": "everyMinute"
+            }
+          ]
+        },
+        "simple": false,
+        "filters": {
+          "q": "subject:invoice has:attachment",
+          "readStatus": "unread"
+        },
+        "options": {
+          "downloadAttachments": true
+        }
+      },
+      "id": "a50838f9-f5ef-481a-a61b-0fb2fd2385df",
+      "name": "New Invoice Email",
+      "type": "n8n-nodes-base.gmailTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        48,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "formTitle": "Upload supplier invoices",
+        "formDescription": "Invoice Reconciliation Agent - test upload",
+        "formFields": {
+          "values": [
+            {
+              "fieldLabel": "Invoice PDFs",
+              "fieldType": "file",
+              "acceptFileTypes": ".pdf",
+              "requiredField": true
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "f6576609-4f54-4917-9c2b-61a1e3cbb448",
+      "name": "Test Upload Form",
+      "type": "n8n-nodes-base.formTrigger",
+      "typeVersion": 2.2,
+      "position": [
+        48,
+        384
+      ],
+      "webhookId": "df4b20f9-edd6-4168-84c9-fe79de94e4da"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Finds every PDF on the incoming email / form upload and builds the request for the AI.\nconst PROMPT = `You are an accounts-payable assistant. Extract the data from this supplier invoice.\nRules:\n- Copy values exactly as printed. Do not guess or calculate anything that is not printed.\n- Numbers: digits only, no currency symbols or commas (e.g. 45194.00).\n- po_number is the BUYER's purchase order reference. It may be labelled \"PO Number\", \"Order Ref\", or appear in the notes/footer. Return \"\" if it is not on the invoice.\n- vendor_name is the company that ISSUED the invoice (the seller), not the customer.\n- One entry in line_items per billed line.`;\n\nconst SCHEMA = {\n  type: 'OBJECT',\n  properties: {\n    vendor_name: { type: 'STRING' },\n    invoice_number: { type: 'STRING' },\n    invoice_date: { type: 'STRING' },\n    po_number: { type: 'STRING' },\n    line_items: {\n      type: 'ARRAY',\n      items: {\n        type: 'OBJECT',\n        properties: {\n          description: { type: 'STRING' },\n          quantity: { type: 'NUMBER' },\n          unit_price: { type: 'NUMBER' },\n          amount: { type: 'NUMBER' },\n        },\n        required: ['description', 'quantity', 'unit_price', 'amount'],\n      },\n    },\n    subtotal: { type: 'NUMBER' },\n    tax_rate_percent: { type: 'NUMBER' },\n    tax_amount: { type: 'NUMBER' },\n    total: { type: 'NUMBER' },\n  },\n  required: ['vendor_name', 'invoice_number', 'po_number', 'line_items', 'subtotal', 'tax_amount', 'total'],\n};\n\nconst items = $input.all();\nconst out = [];\nfor (let i = 0; i < items.length; i++) {\n  const item = items[i];\n  const binaries = item.binary || {};\n  for (const key of Object.keys(binaries)) {\n    const b = binaries[key];\n    const name = b.fileName || key;\n    const isPdf = String(b.mimeType || '').includes('pdf') || name.toLowerCase().endsWith('.pdf');\n    if (!isPdf) continue;\n    const buffer = await this.helpers.getBinaryDataBuffer(i, key);\n    out.push({\n      json: {\n        file_name: name,\n        source: item.json.subject !== undefined ? 'email' : 'upload',\n        email_from: (item.json.from && (item.json.from.text || item.json.from)) || '',\n        gemini_request: {\n          contents: [{\n            parts: [\n              { inline_data: { mime_type: 'application/pdf', data: buffer.toString('base64') } },\n              { text: PROMPT },\n            ],\n          }],\n          generationConfig: {\n            temperature: 0,\n            responseMimeType: 'application/json',\n            responseSchema: SCHEMA,\n          },\n        },\n      },\n    });\n  }\n}\nreturn out;\n"
+      },
+      "id": "e12c9a14-d4f0-4819-8fa9-5834ede8dcaf",
+      "name": "Prepare PDF for AI",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        304,
+        272
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.gemini_request) }}",
+        "options": {
+          "batching": {
+            "batch": {
+              "batchSize": 1,
+              "batchInterval": 7000
+            }
+          },
+          "timeout": 120000
+        }
+      },
+      "id": "ef96076b-1fea-44eb-a173-1fd64cceae80",
+      "name": "AI: Read Invoice (Gemini)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        544,
+        272
+      ],
+      "retryOnFail": true,
+      "maxTries": 5,
+      "waitBetweenTries": 5000,
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "yRYAnAADpGX6QTlS",
+          "name": "Header Auth account"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Turns the AI's reply into clean invoice data. If the AI call failed, the error is kept\n// so the invoice gets flagged for a human instead of silently disappearing.\nconst prepared = $('Prepare PDF for AI').all();\nreturn $input.all().map((item, i) => {\n  const meta = (prepared[i] && prepared[i].json) || {};\n  let invoice = null;\n  let extraction_error = '';\n  try {\n    if (item.json.error) throw new Error(JSON.stringify(item.json.error).slice(0, 200));\n    const text = item.json.candidates[0].content.parts.map(p => p.text || '').join('');\n    invoice = JSON.parse(text);\n  } catch (e) {\n    extraction_error = 'AI could not read this invoice (' + e.message + ')';\n  }\n  return {\n    json: {\n      file_name: meta.file_name || '',\n      source: meta.source || '',\n      email_from: meta.email_from || '',\n      extraction_error,\n      invoice,\n    },\n  };\n});\n"
+      },
+      "id": "e7007ecf-53b5-4146-be44-efeeb02ee37f",
+      "name": "Parse AI Output",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        784,
+        272
+      ]
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "https://docs.google.com/spreadsheets/d/1Fbb506tsfsIPxe1PUEYQZI16oe0dzX4TokIQrQYIuPI/edit?gid=1456325283#gid=1456325283",
+          "mode": "url"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": 1456325283,
+          "mode": "list",
+          "cachedResultName": "POs",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1Fbb506tsfsIPxe1PUEYQZI16oe0dzX4TokIQrQYIuPI/edit#gid=1456325283"
+        },
+        "options": {}
+      },
+      "id": "85e146d8-a62f-4d18-a20b-058d99e9853a",
+      "name": "Get POs",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        1008,
+        272
+      ],
+      "executeOnce": true,
+      "alwaysOutputData": true,
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "By7wX7XEd6l1OBh8",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "https://docs.google.com/spreadsheets/d/1Fbb506tsfsIPxe1PUEYQZI16oe0dzX4TokIQrQYIuPI/edit?gid=1456325283#gid=1456325283",
+          "mode": "url"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": 954903658,
+          "mode": "list",
+          "cachedResultName": "Log",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1Fbb506tsfsIPxe1PUEYQZI16oe0dzX4TokIQrQYIuPI/edit#gid=954903658"
+        },
+        "options": {}
+      },
+      "id": "0daf5844-6207-44b7-96d4-0ad7bc899593",
+      "name": "Get Log",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        1232,
+        272
+      ],
+      "executeOnce": true,
+      "alwaysOutputData": true,
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "By7wX7XEd6l1OBh8",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============ SETTINGS (change these to tune the agent) ============\nconst GST_RATE = 0.18;            // expected GST on every PO\nconst AMOUNT_TOLERANCE_RS = 2;    // rounding allowed on totals\nconst PRICE_TOLERANCE_PCT = 0.5;  // allowed unit-price difference\nconst VENDOR_MATCH_MIN = 0.6;     // how similar vendor names must be (0-1)\nconst ITEM_MATCH_MIN = 0.5;       // how similar item names must be (0-1)\n// ===================================================================\n// The AI only READS the invoice. Every approve/flag decision below is a fixed rule,\n// so the same invoice always gets the same answer and every decision can be explained.\n\nconst STOP = new Set(['pvt', 'ltd', 'private', 'limited', 'co', 'company', 'the', 'and', 'of', 'inc', 'llp']);\nconst tokens = s => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').split(' ')\n  .filter(t => t && !STOP.has(t)).map(t => (t.length > 3 && t.endsWith('s') ? t.slice(0, -1) : t));\nfunction similarity(a, b) {\n  const A = new Set(tokens(a)), B = new Set(tokens(b));\n  if (!A.size || !B.size) return 0;\n  let common = 0;\n  for (const t of A) if (B.has(t)) common++;\n  return common / Math.min(A.size, B.size);\n}\nconst num = v => Number(String(v ?? '').replace(/[^0-9.\\-]/g, '')) || 0;\nconst rs = v => 'Rs.' + num(v).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });\nconst normId = s => String(s || '').trim().toUpperCase();\nconst vendorKey = s => tokens(s).join(' ');\n\nconst poRows = $('Get POs').all().map(i => i.json).filter(r => r.po_number);\nconst logRows = $('Get Log').all().map(i => i.json).filter(r => r.invoice_number);\nconst seen = new Set(logRows.map(r => normId(r.invoice_number) + '|' + vendorKey(r.vendor)));\n\nconst results = [];\nfor (const { json: x } of $('Parse AI Output').all()) {\n  const reasons = [];\n  const inv = x.invoice || {};\n  let expected = 0;\n\n  if (x.extraction_error) reasons.push(x.extraction_error);\n  else {\n    // 1) Did the AI read the invoice properly? Check the invoice's own maths.\n    const lines = (inv.line_items || []).map(li => ({ description: li.description, qty: num(li.quantity), price: num(li.unit_price) }));\n    const missing = ['invoice_number', 'vendor_name', 'total'].filter(f => !inv[f]);\n    if (!lines.length) missing.push('line items');\n    if (missing.length) reasons.push('AI could not find: ' + missing.join(', '));\n    const lineSum = lines.reduce((s, l) => s + l.qty * l.price, 0);\n    if (lines.length && Math.abs(lineSum - num(inv.subtotal)) > AMOUNT_TOLERANCE_RS)\n      reasons.push(`Reading check failed: items add up to ${rs(lineSum)} but subtotal reads ${rs(inv.subtotal)}`);\n    if (Math.abs(num(inv.subtotal) + num(inv.tax_amount) - num(inv.total)) > AMOUNT_TOLERANCE_RS)\n      reasons.push(`Reading check failed: subtotal + tax does not equal total ${rs(inv.total)}`);\n\n    // 2) Already processed?\n    const dupKey = normId(inv.invoice_number) + '|' + vendorKey(inv.vendor_name);\n    if (inv.invoice_number && seen.has(dupKey)) reasons.push(`Duplicate: invoice ${inv.invoice_number} was already processed`);\n    seen.add(dupKey);\n\n    // 3) Match against the purchase order\n    const poNum = normId(inv.po_number);\n    const poLines = poRows.filter(r => normId(r.po_number) === poNum);\n    if (!poNum) reasons.push('No PO number found on the invoice');\n    else if (!poLines.length) reasons.push(`PO ${poNum} not found in the PO sheet`);\n    else {\n      const poVendor = poLines[0].vendor;\n      if (similarity(inv.vendor_name, poVendor) < VENDOR_MATCH_MIN)\n        reasons.push(`Vendor mismatch: invoice is from \"${inv.vendor_name}\" but ${poNum} is with \"${poVendor}\"`);\n\n      const used = new Set();\n      let lineIssue = false;\n      for (const li of lines) {\n        let best = -1, bestScore = 0;\n        poLines.forEach((p, idx) => {\n          if (used.has(idx)) return;\n          const s = similarity(li.description, p.item_description);\n          if (s > bestScore) { bestScore = s; best = idx; }\n        });\n        if (best < 0 || bestScore < ITEM_MATCH_MIN) {\n          reasons.push(`Item not on PO: \"${li.description}\" (${li.qty} x ${rs(li.price)})`);\n          lineIssue = true; continue;\n        }\n        used.add(best);\n        const p = poLines[best], pq = num(p.quantity), pp = num(p.unit_price);\n        expected += pq * pp;\n        if (li.qty !== pq) { reasons.push(`Quantity mismatch on \"${p.item_description}\": invoice ${li.qty}, PO ${pq}`); lineIssue = true; }\n        if (Math.abs(li.price - pp) > Math.max(1, pp * PRICE_TOLERANCE_PCT / 100)) {\n          reasons.push(`Price mismatch on \"${p.item_description}\": invoice ${rs(li.price)}, PO ${rs(pp)}`); lineIssue = true;\n        }\n      }\n      expected = Math.round(expected * (1 + GST_RATE) * 100) / 100;\n      if (!lineIssue && Math.abs(num(inv.total) - expected) > AMOUNT_TOLERANCE_RS) {\n        const rate = num(inv.tax_rate_percent);\n        const gstNote = rate && Math.abs(rate - GST_RATE * 100) > 0.01 ? ` (invoice charges ${rate}% GST, expected ${GST_RATE * 100}%)` : '';\n        reasons.push(`Total mismatch: invoice ${rs(inv.total)}, expected ${rs(expected)}${gstNote}`);\n      }\n    }\n  }\n\n  results.push({\n    json: {\n      processed_at: new Date().toISOString().replace('T', ' ').slice(0, 19),\n      invoice_number: inv.invoice_number || '',\n      po_number: inv.po_number || '',\n      vendor: inv.vendor_name || '',\n      invoice_total: num(inv.total),\n      expected_total: expected,\n      status: reasons.length ? 'FLAGGED' : 'APPROVED',\n      reasons: reasons.length ? reasons.join(' | ') : 'All checks passed',\n      file_name: x.file_name,\n      source: x.source,\n    },\n  });\n}\nreturn results;\n"
+      },
+      "id": "ec61d7dd-d05e-4161-bb55-acdd19caf772",
+      "name": "Check Against PO (rules)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1440,
+        272
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "https://docs.google.com/spreadsheets/d/1Fbb506tsfsIPxe1PUEYQZI16oe0dzX4TokIQrQYIuPI/edit?gid=1456325283#gid=1456325283",
+          "mode": "url"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": 954903658,
+          "mode": "list",
+          "cachedResultName": "Log",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1Fbb506tsfsIPxe1PUEYQZI16oe0dzX4TokIQrQYIuPI/edit#gid=954903658"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "processed_at",
+              "displayName": "processed_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "invoice_number",
+              "displayName": "invoice_number",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "po_number",
+              "displayName": "po_number",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "vendor",
+              "displayName": "vendor",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "invoice_total",
+              "displayName": "invoice_total",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "expected_total",
+              "displayName": "expected_total",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "status",
+              "displayName": "status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "reasons",
+              "displayName": "reasons",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "file_name",
+              "displayName": "file_name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "source",
+              "displayName": "source",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "1cd71d72-5596-4392-ada7-3eade489c7e4",
+      "name": "Write to Log",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        1664,
+        272
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "By7wX7XEd6l1OBh8",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "a4f9f19b-7fba-4ef0-b5bb-366e55f25dff",
+              "leftValue": "={{ $('Check Against PO (rules)').item.json.status }}",
+              "rightValue": "FLAGGED",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "c95fede1-8112-409d-8077-06c675bad788",
+      "name": "Flagged?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1888,
+        272
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "PASTE_YOUR_SLACK_WEBHOOK_URL_HERE",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ text: ':warning: *Invoice needs review* \\n' + '*' + $('Check Against PO (rules)').item.json.vendor + '*  |  Invoice ' + $('Check Against PO (rules)').item.json.invoice_number + '  |  ' + ($('Check Against PO (rules)').item.json.po_number || 'no PO') + '\\n' + 'Invoice total: Rs.' + $('Check Against PO (rules)').item.json.invoice_total + '   Expected: Rs.' + $('Check Against PO (rules)').item.json.expected_total + '\\n' + '*Why:*\\n' + $('Check Against PO (rules)').item.json.reasons.split(' | ').map(r => '• ' + r).join('\\n') + '\\n_File: ' + $('Check Against PO (rules)').item.json.file_name + '_' }) }}",
+        "options": {}
+      },
+      "id": "9de0c3af-5e2c-4c67-8a5b-9e5f60429b58",
+      "name": "Alert Finance on Slack",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2128,
+        192
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "fa36b7d8-8a06-4512-a2ca-9fb271550624",
+      "name": "Auto-approved (no action)",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        2128,
+        384
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## 1. Invoice comes in\nBy email (subject contains *invoice*, PDF attached) or the test upload form.",
+        "height": 140,
+        "color": 7
+      },
+      "id": "539537a6-377e-4628-a7ef-2940ad98b6ff",
+      "name": "Note 1",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## 2. AI reads the PDF\nGemini extracts vendor, PO number, line items and totals into fixed fields. The AI only *reads* - it never decides.",
+        "height": 140,
+        "width": 700,
+        "color": 5
+      },
+      "id": "5bb13409-0b79-4ebf-b676-307c401efe3f",
+      "name": "Note 2",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        288,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## 3. Rules decide\nCompare with the PO sheet: vendor, items, quantity, price, total, duplicates. Also checks the AI's reading with the invoice's own maths.",
+        "height": 140,
+        "width": 640,
+        "color": 4
+      },
+      "id": "8dcd6bf2-07be-4ed1-b2e9-3b27f0781a15",
+      "name": "Note 3",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        992,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## 4. Act\nEvery invoice is logged. Only mismatches go to a human on Slack.",
+        "height": 140,
+        "width": 640,
+        "color": 6
+      },
+      "id": "507b2de7-e2b3-45f8-828f-87c8b5be6389",
+      "name": "Note 4",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        1648,
+        0
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "New Invoice Email": {
+      "main": [
+        [
+          {
+            "node": "Prepare PDF for AI",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Test Upload Form": {
+      "main": [
+        [
+          {
+            "node": "Prepare PDF for AI",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare PDF for AI": {
+      "main": [
+        [
+          {
+            "node": "AI: Read Invoice (Gemini)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI: Read Invoice (Gemini)": {
+      "main": [
+        [
+          {
+            "node": "Parse AI Output",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse AI Output": {
+      "main": [
+        [
+          {
+            "node": "Get POs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get POs": {
+      "main": [
+        [
+          {
+            "node": "Get Log",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Log": {
+      "main": [
+        [
+          {
+            "node": "Check Against PO (rules)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Against PO (rules)": {
+      "main": [
+        [
+          {
+            "node": "Write to Log",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Write to Log": {
+      "main": [
+        [
+          {
+            "node": "Flagged?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Flagged?": {
+      "main": [
+        [
+          {
+            "node": "Alert Finance on Slack",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Auto-approved (no action)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "2929dd1c-cb6e-41b6-80c4-116e7cf68692",
+  "meta": {
+    "instanceId": "5fb87235cb24ecbdcb577860b8bdd5287904d51bccb706c14bb38dee5fd9c8e6"
+  },
+  "nodeGroups": [],
+  "id": "5qRDjpBLmRt1ADiv",
+  "tags": []
+}

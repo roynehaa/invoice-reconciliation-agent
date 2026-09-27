@@ -1,0 +1,21 @@
+test_no,file,invoice_number,vendor_on_invoice,po_ref,invoice_total_rs,expected_result,why
+01,invoice_01_NW-2026-0451.pdf,NW-2026-0451,Nova Furniture Works Pvt. Ltd.,PO-2026-101,"179,360.00",APPROVED,Clean match
+02,invoice_02_SOS-26-1187.pdf,SOS/26/1187,Sharma Office Supplies,PO-2026-102,"45,194.00",APPROVED,Clean match
+03,invoice_03_KE-INV-3302.pdf,KE-INV-3302,Kaveri Electronics,PO-2026-103,"159,300.00",APPROVED,Clean match
+04,invoice_04_MPC-7781.pdf,MPC-7781,Metro Packaging Co.,PO-2026-104,"35,282.00",FLAGGED,"Quantity: 550 boxes billed, PO says 500"
+05,invoice_05_OITS-2026-092.pdf,OITS-2026-092,Orbit IT Solutions,PO-2026-105,"60,180.00",APPROVED,Clean match
+06,invoice_06_BLS-1045.pdf,BLS-1045,BlueLeaf Stationers,PO-2026-106,"32,627.00",APPROVED,Clean match
+07,invoice_07_NW-2026-0467.pdf,NW-2026-0467,Nova Furniture Works Pvt. Ltd.,PO-2026-107,"96,760.00",FLAGGED,"Price: Rs.41,000 billed, PO says Rs.38,500"
+08,invoice_08_SOS-26-1203.pdf,SOS/26/1203,Sharma Office Supplies,PO-2026-108,"60,416.00",APPROVED,Clean match
+09,invoice_09_KE-INV-3319.pdf,KE-INV-3319,Kaveri Electronics,PO-2026-109,"104,666.00",FLAGGED,Extra item not on PO: Installation charges
+10,invoice_10_MPC-7795.pdf,MPC-7795,Metro Packaging Co.,PO-2026-110,"36,580.00",APPROVED,Clean match
+11,invoice_11_OITS-2026-101.pdf,OITS-2026-101,Orbit IT Solutions,PO-2026-111,"45,076.00",FLAGGED,"Price: router Rs.3,950 billed, PO says Rs.3,600"
+12,invoice_12_BLS-1052.pdf,BLS-1052,BlueLeaf Stationers,PO-2026-112,"22,656.00",APPROVED,Clean match (scanned image PDF - tests AI reading)
+13,invoice_13_FBP-0231.pdf,FBP-0231,Fresh Brew Pantry Supplies,PO-2026-113,"37,937.00",APPROVED,Clean match
+14,invoice_14_KE-INV-3327.pdf,KE-INV-3327,Kaveri Electronics,PO-2026-114,"48,852.00",FLAGGED,"Quantity: 18 webcams billed, PO says 15"
+15,invoice_15_NW-2026-0480.pdf,NW-2026-0480,Nova Furniture Works,PO-2026-115,"63,012.00",APPROVED,Clean match
+16,invoice_16_SOS-26-1219.pdf,SOS/26/1219,Sharma Office Supplies,PO-2026-116,"30,600.00",FLAGGED,Total: GST charged at 20% instead of 18%
+17,invoice_17_MPC-7802.pdf,MPC-7802,Metro Packaging Co.,PO-2026-199,"15,045.00",FLAGGED,PO-2026-199 does not exist
+18,invoice_18_OTS-2026-110.pdf,OTS-2026-110,Orbit Tech Services Pvt Ltd,PO-2026-118,"40,120.00",FLAGGED,"Vendor: invoice from Orbit Tech Services, PO is with Orbit IT Solutions"
+19,invoice_19_NW-2026-0451.pdf,NW-2026-0451,Nova Furniture Works Pvt. Ltd.,PO-2026-101,"179,360.00",FLAGGED,Duplicate: same invoice number as #01 (run #01 first)
+20,invoice_20_MPC-7810.pdf,MPC-7810,Metro Packaging Co.,PO-2026-117,"22,656.00",APPROVED,Clean match
